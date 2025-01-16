@@ -4,6 +4,7 @@ import ctypes
 import requests
 import zipfile
 import winshell  # pip install winshell
+import winreg
 from PyQt5.QtWidgets import (
     QApplication, QStackedWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QProgressBar, QWidget, QLineEdit, QFileDialog, QMessageBox
@@ -14,6 +15,8 @@ VERSION_URL = "https://raw.githubusercontent.com/FoxH2010/FoxBr/refs/heads/main/
 DOWNLOAD_URL_TEMPLATE = "https://github.com/FoxH2010/FoxBr/releases/download/{}/FoxBr.zip"
 DEFAULT_INSTALL_PATH = r"C:\Program Files\FoxTeam\FoxBr"
 ZIP_FILENAME = "FoxBr.zip"
+REGISTRY_KEY_PATH = r"SOFTWARE\FoxTeam\FoxBr"
+INSTALL_PATH_KEY = "InstallPath"
 
 
 def is_admin():
@@ -22,6 +25,15 @@ def is_admin():
         return ctypes.windll.shell32.IsUserAnAdmin()
     except:
         return False
+
+
+def write_installation_path_to_registry(install_path):
+    """Write the installation path to the Windows registry."""
+    try:
+        with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, REGISTRY_KEY_PATH) as key:
+            winreg.SetValueEx(key, INSTALL_PATH_KEY, 0, winreg.REG_SZ, install_path)
+    except Exception as e:
+        print(f"Failed to write to registry: {e}")
 
 
 class VersionFetcher(QThread):
@@ -100,6 +112,7 @@ class InstallerWizard(QStackedWidget):
         self.resize(600, 400)
         self.setCurrentWidget(self.welcome_page)
 
+
 class BasePage(QWidget):
     def __init__(self, wizard):
         super().__init__()
@@ -134,6 +147,7 @@ class BasePage(QWidget):
         current_index = self.wizard.currentIndex()
         self.wizard.setCurrentIndex(min(self.wizard.count() - 1, current_index + 1))
 
+
 class WelcomePage(BasePage):
     def __init__(self, wizard):
         super().__init__(wizard)
@@ -147,6 +161,7 @@ class WelcomePage(BasePage):
         self.content_layout.addStretch()  # Spacer for vertical centering
 
         self.back_button.setEnabled(False)
+
 
 class PathSelectionPage(BasePage):
     def __init__(self, wizard):
@@ -165,21 +180,33 @@ class PathSelectionPage(BasePage):
         self.content_layout.addWidget(self.path_label)
         self.content_layout.addLayout(path_layout)
 
-        self.next_button.setText("Install")
-        self.next_button.clicked.connect(self.install_action)
+        self.next_button.setText("Next")
+        self.next_button.clicked.connect(self.check_installation)
 
     def browse_path(self):
         selected_dir = QFileDialog.getExistingDirectory(self, "Select Installation Directory", DEFAULT_INSTALL_PATH)
         if selected_dir:
             self.path_input.setText(selected_dir)
 
-    def install_action(self):
+    def check_installation(self):
         selected_path = self.path_input.text()
-        if not os.path.exists(selected_path):
-            os.makedirs(selected_path)  # Create the directory if it doesn't exist
-        self.wizard.download_page.install_path = selected_path
-        self.wizard.setCurrentWidget(self.wizard.download_page)
-        self.wizard.download_page.start_version_fetch()
+        version_file_path = os.path.join(selected_path, "version.txt")
+
+        if os.path.exists(version_file_path):
+            with open(version_file_path, "r") as version_file:
+                installed_version = version_file.read().strip()
+            
+            self.wizard.download_page.install_path = selected_path
+            self.wizard.download_page.installed_version = installed_version
+            self.wizard.setCurrentWidget(self.wizard.download_page)
+            self.wizard.download_page.start_version_fetch(update_mode=True)
+        else:
+            if not os.path.exists(selected_path):
+                os.makedirs(selected_path)  # Create the directory if it doesn't exist
+            self.wizard.download_page.install_path = selected_path
+            self.wizard.download_page.installed_version = None
+            self.wizard.setCurrentWidget(self.wizard.download_page)
+            self.wizard.download_page.start_version_fetch(update_mode=False)
 
 
 class DownloadPage(BasePage):
@@ -192,6 +219,7 @@ class DownloadPage(BasePage):
         self.content_layout.addWidget(self.progress_bar)
 
         self.install_path = None
+        self.installed_version = None
         self.version = None
         self.downloader = None
 
@@ -202,19 +230,30 @@ class DownloadPage(BasePage):
         self.next_button.setText("Cancel")
         self.next_button.clicked.connect(self.cancel_download)
 
-    def start_version_fetch(self):
+    def start_version_fetch(self, update_mode):
+        self.update_mode = update_mode
         self.status_label.setText("Fetching latest version...")
         self.fetcher = VersionFetcher()
-        self.fetcher.version_fetched.connect(self.start_download)
+        self.fetcher.version_fetched.connect(self.compare_versions)
         self.fetcher.error_occurred.connect(self.show_error)
         self.fetcher.start()
 
-    def start_download(self, version):
-        self.version = version
-        download_url = DOWNLOAD_URL_TEMPLATE.format(version)
+    def compare_versions(self, latest_version):
+        self.version = latest_version
+
+        if self.update_mode and self.installed_version == self.version:
+            self.status_label.setText("FoxBr is already up-to-date.")
+            QMessageBox.information(self, "Up-to-Date", "FoxBr is already installed and up-to-date.")
+            self.wizard.setCurrentWidget(self.wizard.completion_page)
+            return
+
+        self.start_download()
+
+    def start_download(self):
+        download_url = DOWNLOAD_URL_TEMPLATE.format(self.version)
         save_path = os.path.join(self.install_path, ZIP_FILENAME)
 
-        self.status_label.setText(f"Downloading FoxBr v{version} to {self.install_path}...")
+        self.status_label.setText(f"Downloading FoxBr v{self.version} to {self.install_path}...")
         self.downloader = InstallerDownloader(download_url, save_path)
         self.downloader.download_progress.connect(self.progress_bar.setValue)
         self.downloader.download_complete.connect(self.download_complete)
@@ -226,23 +265,26 @@ class DownloadPage(BasePage):
         zip_path = os.path.join(self.install_path, ZIP_FILENAME)
 
         try:
-            # Extract the ZIP file
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 zip_ref.extractall(self.install_path)
-
-            # Remove the ZIP file
             os.remove(zip_path)
 
-            # Create a shortcut on the desktop for the browser
-            browser_path = os.path.join(self.install_path, "FoxBr.exe")
-            desktop = winshell.desktop()
-            shortcut_path = os.path.join(desktop, "FoxBr.lnk")
-            winshell.CreateShortcut(
-                Path=shortcut_path,
-                Target=browser_path,
-                Icon=(browser_path, 0),
-                Description="FoxBr Browser"
-            )
+            version_file_path = os.path.join(self.install_path, "version.txt")
+            with open(version_file_path, "w") as version_file:
+                version_file.write(self.version)
+
+            write_installation_path_to_registry(self.install_path)
+
+            if not self.update_mode:
+                browser_path = os.path.join(self.install_path, "FoxBr.exe")
+                desktop = winshell.desktop()
+                shortcut_path = os.path.join(desktop, "FoxBr.lnk")
+                winshell.CreateShortcut(
+                    Path=shortcut_path,
+                    Target=browser_path,
+                    Icon=(browser_path, 0),
+                    Description="FoxBr Browser"
+                )
             self.wizard.setCurrentWidget(self.wizard.completion_page)
         except Exception as e:
             self.status_label.setText(f"Error extracting files: {e}")
@@ -255,6 +297,7 @@ class DownloadPage(BasePage):
     def show_error(self, error):
         self.status_label.setText(f"Error: {error}")
 
+
 class CanceledPage(BasePage):
     def __init__(self, wizard):
         super().__init__(wizard)
@@ -264,38 +307,37 @@ class CanceledPage(BasePage):
         self.content_layout.addWidget(label)
 
         self.button_layout.removeWidget(self.back_button)
-        self.back_button.deleteLater()  # Remove back button
+        self.back_button.deleteLater()
         self.back_button = None
 
         self.next_button.setText("Finish")
         self.next_button.clicked.connect(QApplication.instance().quit)
+
 
 class CompletionPage(BasePage):
     def __init__(self, wizard):
         super().__init__(wizard)
 
-        # Create attention-catching message
         label = QLabel("Installation Complete!")
         label.setAlignment(Qt.AlignCenter)
         label.setStyleSheet("font-size: 24px; font-weight: bold; color: green;")
 
-        # Add a thank-you message below the main title
         sub_label = QLabel("Thank you for installing FoxBr.")
         sub_label.setAlignment(Qt.AlignCenter)
         sub_label.setStyleSheet("font-size: 16px;")
 
-        self.content_layout.addStretch()  # Add stretch for vertical centering
+        self.content_layout.addStretch()
         self.content_layout.addWidget(label)
         self.content_layout.addWidget(sub_label)
-        self.content_layout.addStretch()  # Add stretch for vertical centering
+        self.content_layout.addStretch()
 
-        # Remove Back button and configure Finish button
         self.button_layout.removeWidget(self.back_button)
-        self.back_button.deleteLater()  # Remove back button
+        self.back_button.deleteLater()
         self.back_button = None
 
         self.next_button.setText("Finish")
         self.next_button.clicked.connect(QApplication.instance().quit)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

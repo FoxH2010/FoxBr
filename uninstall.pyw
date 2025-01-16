@@ -17,6 +17,7 @@ else:
 
 REGISTRY_KEY_PATH = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\FoxBr"
 DESKTOP_SHORTCUT_NAME = "FoxBr.lnk"
+MAIN_EXECUTABLE_NAME = "FoxBr.exe"  # The file to check for validity
 
 
 def is_admin():
@@ -124,6 +125,14 @@ class Uninstaller(QWidget):
 
     def start_uninstallation(self):
         """Begin the uninstallation process."""
+        if not self.validate_installation_directory():
+            QMessageBox.critical(
+                self, "Error", f"The uninstaller is not in the correct directory.\n"
+                               f"Ensure {MAIN_EXECUTABLE_NAME} is present in the same folder."
+            )
+            self.close()
+            return
+
         confirm = QMessageBox.question(
             self,
             "Confirm Uninstallation",
@@ -141,6 +150,11 @@ class Uninstaller(QWidget):
             self.worker.progress_updated.connect(self.update_progress)
             self.worker.uninstallation_complete.connect(self.complete_uninstallation)
             self.worker.start()
+
+    def validate_installation_directory(self):
+        """Ensure the uninstaller is in the correct directory."""
+        main_executable_path = os.path.join(INSTALL_DIR, MAIN_EXECUTABLE_NAME)
+        return os.path.exists(main_executable_path)
 
     def update_progress(self, progress):
         """Update the progress bar."""
