@@ -3,15 +3,14 @@ import os
 import ctypes
 import requests
 import zipfile
-import shutil
 import winreg
-from PyQt5.QtWidgets import QApplication, QMessageBox
 
 VERSION_URL = "https://raw.githubusercontent.com/FoxH2010/FoxBr/refs/heads/main/version"
 DOWNLOAD_URL_TEMPLATE = "https://github.com/FoxH2010/FoxBr/releases/download/{}/FoxBr.zip"
 ZIP_FILENAME = "FoxBr_Update.zip"
 REGISTRY_KEY_PATH = r"SOFTWARE\FoxTeam\FoxBr"
 INSTALL_PATH_KEY = "InstallPath"
+MAIN_EXECUTABLE_NAME = "FoxBr.exe"
 
 
 def is_admin():
@@ -29,7 +28,7 @@ def fetch_latest_version():
         response.raise_for_status()
         return response.text.strip()
     except requests.RequestException as e:
-        print(f"Error fetching version: {e}")
+        print(f"[Updater] Error fetching version: {e}")
         return None
 
 
@@ -46,19 +45,23 @@ def download_update(version, save_path):
                     file.write(chunk)
         return True
     except requests.RequestException as e:
-        print(f"Error downloading update: {e}")
+        print(f"[Updater] Error downloading update: {e}")
         return False
 
 
 def extract_and_replace(zip_path, install_path):
     """Extract the ZIP file and replace old files."""
     try:
-        # Rename the current executable to FoxBr_old.exe
-        current_executable = os.path.join(install_path, "FoxBr.exe")
+        # Define paths for current and backup executables
+        current_executable = os.path.join(install_path, MAIN_EXECUTABLE_NAME)
         old_executable = os.path.join(install_path, "FoxBr_old.exe")
+
+        # Remove existing backup if it exists
+        if os.path.exists(old_executable):
+            os.remove(old_executable)
+
+        # Rename the current executable to a backup
         if os.path.exists(current_executable):
-            if os.path.exists(old_executable):
-                os.remove(old_executable)  # Remove previous backup if it exists
             os.rename(current_executable, old_executable)
 
         # Extract the new files
@@ -69,7 +72,7 @@ def extract_and_replace(zip_path, install_path):
         os.remove(zip_path)
         return True
     except Exception as e:
-        print(f"Error extracting update: {e}")
+        print(f"[Updater] Error extracting update: {e}")
         return False
 
 
@@ -80,10 +83,10 @@ def read_registry_install_path():
             install_path, _ = winreg.QueryValueEx(key, INSTALL_PATH_KEY)
             return install_path
     except FileNotFoundError:
-        print("Installation path not found in registry.")
+        print("[Updater] Installation path not found in registry.")
         return None
     except Exception as e:
-        print(f"Failed to read registry: {e}")
+        print(f"[Updater] Failed to read registry: {e}")
         return None
 
 
@@ -104,43 +107,48 @@ def write_installed_version(install_path, version):
 
 
 def main():
+    # Ensure the updater has admin privileges
     if not is_admin():
         ctypes.windll.shell32.ShellExecuteW(
             None, "runas", sys.executable, " ".join(sys.argv), None, 1
         )
         sys.exit(0)
 
+    # Retrieve the installation path
     install_path = read_registry_install_path()
     if not install_path:
-        QMessageBox.critical(None, "Error", "Installation path not found. Please reinstall FoxBr.")
-        return
+        print("[Updater] Installation path not found. Exiting.")
+        sys.exit(1)
 
+    # Fetch the latest version
     latest_version = fetch_latest_version()
     if not latest_version:
-        QMessageBox.critical(None, "Error", "Failed to fetch the latest version.")
-        return
+        print("[Updater] Failed to fetch the latest version. Exiting.")
+        sys.exit(1)
 
+    # Read the currently installed version
     current_version = read_installed_version(install_path)
     if current_version == latest_version:
-        print("FoxBr is already up-to-date.")
-        return
+        print("[Updater] FoxBr is already up-to-date. Exiting.")
+        sys.exit(0)
 
-    print(f"Updating from version {current_version} to {latest_version}...")
+    print(f"[Updater] Updating from version {current_version} to {latest_version}...")
 
+    # Download the update
     zip_path = os.path.join(install_path, ZIP_FILENAME)
     if not download_update(latest_version, zip_path):
-        QMessageBox.critical(None, "Error", "Failed to download the update.")
-        return
+        print("[Updater] Failed to download the update. Exiting.")
+        sys.exit(1)
 
+    # Extract and replace files
     if not extract_and_replace(zip_path, install_path):
-        QMessageBox.critical(None, "Error", "Failed to install the update.")
-        return
+        print("[Updater] Failed to install the update. Exiting.")
+        sys.exit(1)
 
+    # Write the new version to the version file
     write_installed_version(install_path, latest_version)
-    QMessageBox.information(None, "Update Complete", "FoxBr has been updated successfully.")
+    print("[Updater] Update complete. Exiting.")
 
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
     main()
-    sys.exit(app.exec_())

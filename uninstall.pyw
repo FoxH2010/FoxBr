@@ -9,13 +9,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 import winreg
 
-# Determine the directory of the uninstaller
-if getattr(sys, 'frozen', False):
-    INSTALL_DIR = os.path.dirname(sys.executable)  # PyInstaller executable directory
-else:
-    INSTALL_DIR = os.path.dirname(os.path.abspath(__file__))  # Script directory
-
-REGISTRY_KEY_PATH = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\FoxBr"
+REGISTRY_KEY_PATH = r"SOFTWARE\FoxTeam\FoxBr"
 DESKTOP_SHORTCUT_NAME = "FoxBr.lnk"
 MAIN_EXECUTABLE_NAME = "FoxBr.exe"  # The file to check for validity
 
@@ -26,6 +20,20 @@ def is_admin():
         return ctypes.windll.shell32.IsUserAnAdmin()
     except:
         return False
+
+
+def read_registry_install_path():
+    """Retrieve the installation path from the Windows registry."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, REGISTRY_KEY_PATH) as key:
+            install_path, _ = winreg.QueryValueEx(key, "InstallPath")
+            return install_path
+    except FileNotFoundError:
+        print("Installation path not found in registry.")
+        return None
+    except Exception as e:
+        print(f"Failed to read registry: {e}")
+        return None
 
 
 def remove_registry_entry():
@@ -93,6 +101,11 @@ class UninstallerWorker(QThread):
 class Uninstaller(QWidget):
     def __init__(self):
         super().__init__()
+        self.uninstall_path = read_registry_install_path()  # Get path from registry
+        if not self.uninstall_path:
+            QMessageBox.critical(None, "Error", "Could not find the installation path. Uninstaller will now exit.")
+            sys.exit(1)
+
         self.init_ui()
 
     def init_ui(self):
@@ -127,8 +140,8 @@ class Uninstaller(QWidget):
         """Begin the uninstallation process."""
         if not self.validate_installation_directory():
             QMessageBox.critical(
-                self, "Error", f"The uninstaller is not in the correct directory.\n"
-                               f"Ensure {MAIN_EXECUTABLE_NAME} is present in the same folder."
+                self, "Error", f"The uninstaller is not running from the registered installation directory:\n"
+                               f"{self.uninstall_path}"
             )
             self.close()
             return
@@ -146,15 +159,18 @@ class Uninstaller(QWidget):
             # Remove the desktop shortcut before starting the uninstallation
             remove_shortcut()
 
-            self.worker = UninstallerWorker(INSTALL_DIR, sys.executable)
+            self.worker = UninstallerWorker(self.uninstall_path, sys.executable)
             self.worker.progress_updated.connect(self.update_progress)
             self.worker.uninstallation_complete.connect(self.complete_uninstallation)
             self.worker.start()
 
     def validate_installation_directory(self):
-        """Ensure the uninstaller is in the correct directory."""
-        main_executable_path = os.path.join(INSTALL_DIR, MAIN_EXECUTABLE_NAME)
-        return os.path.exists(main_executable_path)
+        """Ensure both the main executable and the uninstaller are in the registered installation directory."""
+        main_executable_path = os.path.join(self.uninstall_path, MAIN_EXECUTABLE_NAME)
+        return (
+            os.path.exists(main_executable_path) and
+            os.path.dirname(sys.executable) == self.uninstall_path
+        )
 
     def update_progress(self, progress):
         """Update the progress bar."""
@@ -169,7 +185,7 @@ class Uninstaller(QWidget):
     def delete_uninstaller(self):
         """Create a batch file to delete the uninstaller itself."""
         uninstaller_path = sys.executable
-        batch_file = os.path.join(INSTALL_DIR, "delete_self.bat")
+        batch_file = os.path.join(self.uninstall_path, "delete_self.bat")
 
         # Create the batch script
         with open(batch_file, "w") as batch:
